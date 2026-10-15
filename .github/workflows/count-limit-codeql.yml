@@ -1,0 +1,49 @@
+name: Count limit CodeQL (fork only)
+on:
+  workflow_dispatch:
+    inputs:
+      contribution_sha:
+        required: true
+        type: string
+      baseline_sha:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        tree: [baseline, contribution]
+        language: [actions, javascript-typescript]
+    env:
+      TEST_SHA: ${{ matrix.tree == 'contribution' && inputs.contribution_sha || inputs.baseline_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.TEST_SHA }}
+      - name: Verify immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TEST_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TEST_SHA"
+          git log -1 --format='%H %s'
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.2/codeql-bundle-${{ matrix.language == 'actions' && 'actions' || 'javascript' }}-linux64.tar.zst
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee
+        with:
+          output: /tmp/count-limit-codeql
+          upload: never
+          category: /language:${{ matrix.language }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: codeql-${{ matrix.tree }}-${{ matrix.language }}
+          path: /tmp/count-limit-codeql/*.sarif
