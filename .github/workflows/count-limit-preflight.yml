@@ -1,0 +1,92 @@
+name: Count limit preflight (fork only)
+on:
+  workflow_dispatch:
+    inputs:
+      contribution_sha:
+        description: Full contribution commit SHA
+        required: true
+        type: string
+      baseline_sha:
+        description: Full canonical master SHA
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        tree: [baseline, contribution]
+    env:
+      TEST_SHA: ${{ matrix.tree == 'contribution' && inputs.contribution_sha || inputs.baseline_sha }}
+      BASE_SHA: ${{ inputs.baseline_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.TEST_SHA }}
+          fetch-depth: 0
+      - name: Verify immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TEST_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TEST_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          git log -1 --format='%H %cI %s'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '18'
+      - name: Record runtimes and use repository-pinned Yarn
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          node .yarn/releases/yarn-4.17.0.cjs --version
+          echo "CHROME_BIN=$(command -v google-chrome)" >> "$GITHUB_ENV"
+          echo "FIREFOX_BIN=$(command -v firefox)" >> "$GITHUB_ENV"
+          google-chrome --version
+          firefox --version
+      - name: Immutable install
+        run: node .yarn/releases/yarn-4.17.0.cjs install --immutable
+      - name: Required build and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/count-limit-logs
+          node .yarn/releases/yarn-4.17.0.cjs build 2>&1 | tee /tmp/count-limit-logs/build.log
+          node .yarn/releases/yarn-4.17.0.cjs test 2>&1 | tee /tmp/count-limit-logs/tests.log
+      - name: Exercise actual SharedWorker context
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'JS'
+          const fs = require('fs');
+          const root = process.cwd();
+          fs.writeFileSync('/tmp/count-limit-sharedworker.cjs', `module.exports = config => {
+            require(${JSON.stringify(root + '/karma.sharedworker.conf.js')})(config);
+            config.set({basePath:${JSON.stringify(root)},client:{mochaWebWorker:{pattern:['dist/ObjectStoreProvider.spec.js'],worker:'SharedWorker',mocha:{}}}});
+          };`);
+          JS
+          node_modules/.bin/karma start /tmp/count-limit-sharedworker.cjs --browsers ChromeHeadless,FirefoxHeadless --single-run --reporters dots 2>&1 | tee /tmp/count-limit-logs/sharedworker.log
+      - name: Verify contribution version and clean tracked files
+        env:
+          TREE: ${{ matrix.tree }}
+        run: |
+          node <<'JS'
+          const {execFileSync} = require('child_process');
+          const fs = require('fs');
+          const base = JSON.parse(execFileSync('git', ['show', process.env.BASE_SHA + ':package.json'], {encoding:'utf8'})).version;
+          const current = JSON.parse(fs.readFileSync('package.json')).version;
+          if (process.env.TREE === 'contribution' && !require('semver').gt(current, base)) throw new Error(`Version ${current} must be greater than ${base}`);
+          console.log({tree:process.env.TREE,baseline:base,current});
+          JS
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: count-limit-${{ matrix.tree }}
+          path: /tmp/count-limit-logs
